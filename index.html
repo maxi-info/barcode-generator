@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Генератор штрихкодов</title>
+
+    <!-- Favicon: основной .ico + SVG fallback -->
+    <link rel="icon" href="favicon.ico" sizes="any">
+    <link rel="icon" type="image/svg+xml"
+          href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23ffffff'/%3E%3Cg fill='%23000000'%3E%3Crect x='4'  y='6' width='2' height='20'/%3E%3Crect x='8'  y='6' width='1' height='20'/%3E%3Crect x='11' y='6' width='3' height='20'/%3E%3Crect x='16' y='6' width='1' height='20'/%3E%3Crect x='19' y='6' width='2' height='20'/%3E%3Crect x='23' y='6' width='1' height='20'/%3E%3Crect x='26' y='6' width='2' height='20'/%3E%3C/g%3E%3C/svg%3E">
+    <link rel="apple-touch-icon" href="favicon.ico">
+
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+            max-width: 640px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f9fafb;
+            color: #111;
+        }
+        h1 { color: #1f2937; font-size: 24px; }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            background: #fff;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 1px 3px rgba(0,0,0,.08);
+        }
+        label { font-weight: 600; font-size: 14px; }
+        input, select {
+            padding: 10px;
+            font-size: 16px;
+            border-radius: 6px;
+            border: 1px solid #d1d5db;
+            width: 100%;
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #2563eb;
+            box-shadow: 0 0 0 3px rgba(37,99,235,.15);
+        }
+        button {
+            padding: 12px 16px;
+            font-size: 16px;
+            font-weight: 600;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+            transition: background .15s;
+        }
+        .btn-primary { background: #2563eb; color: #fff; }
+        .btn-primary:hover { background: #1e40af; }
+        .error {
+            color: #b91c1c;
+            background: #fee2e2;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 14px;
+            margin-top: 12px;
+        }
+        .result {
+            margin-top: 24px;
+            text-align: center;
+            background: #fff;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 1px 3px rgba(0,0,0,.08);
+        }
+        .result canvas {
+            max-width: 100%;
+            height: auto;
+            background: #fff;
+            image-rendering: pixelated;
+        }
+        .actions {
+            margin-top: 16px;
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+        .hint { font-size: 13px; color: #6b7280; margin-top: 6px; }
+    </style>
+</head>
+<body>
+    <h1>🔖 Генератор штрихкодов</h1>
+
+    <form id="barcodeForm">
+        <div>
+            <label for="data">Данные (цифры/буквы):</label>
+            <input type="text" id="data" placeholder="Например: ABC-12345" required autofocus>
+        </div>
+
+        <div>
+            <label for="format">Формат:</label>
+            <select id="format">
+                <option value="CODE128" selected>CODE128</option>
+                <option value="CODE39">CODE39</option>
+                <option value="EAN13">EAN13</option>
+                <option value="EAN8">EAN8</option>
+                <option value="UPC">UPC-A</option>
+                <option value="ITF14">ITF-14</option>
+                <option value="MSI">MSI</option>
+                <option value="pharmacode">Pharmacode</option>
+            </select>
+        </div>
+
+        <button type="submit" class="btn-primary">Сгенерировать</button>
+    </form>
+
+    <div id="error" class="error" style="display:none;"></div>
+
+    <div id="result" class="result" style="display:none;">
+        <h3 style="margin-top:0;">Результат:</h3>
+        <canvas id="barcodeCanvas"></canvas>
+        <p class="hint" id="filenameHint"></p>
+        <div class="actions">
+            <button type="button" class="btn-primary" id="downloadBtn">⬇️ Скачать PNG</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+
+    <script>
+        // ===== Размеры как во Flask-версии (python-barcode, dpi=300) =====
+        const MODULE_WIDTH_PX  = 4;    // module_width  = 0.35 мм ≈ 4 px
+        const MODULE_HEIGHT_PX = 142;  // module_height = 12.0 мм ≈ 142 px
+        const PADDING_PX       = 5;    // как trim_whitespace(padding=5) во Flask
+
+        const form = document.getElementById('barcodeForm');
+        const dataInput = document.getElementById('data');
+        const formatSelect = document.getElementById('format');
+        const errorBox = document.getElementById('error');
+        const resultBox = document.getElementById('result');
+        const canvas = document.getElementById('barcodeCanvas');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const filenameHint = document.getElementById('filenameHint');
+
+        let currentFilename = 'barcode.png';
+
+        function safeFilename(data) {
+            return data
+                .replace(/[\\/:*?"<>|\x00-\x1f]/g, '_')
+                .trim()
+                .replace(/\.+$/, '')
+                .slice(0, 200) || 'barcode';
+        }
+
+        function showError(msg) {
+            errorBox.textContent = msg;
+            errorBox.style.display = 'block';
+            resultBox.style.display = 'none';
+        }
+
+        function hideError() {
+            errorBox.style.display = 'none';
+        }
+
+        // Аналог trim_whitespace() из Flask
+        function trimWhitespace(sourceCanvas, padding) {
+            const ctx = sourceCanvas.getContext('2d');
+            const w = sourceCanvas.width;
+            const h = sourceCanvas.height;
+            const imgData = ctx.getImageData(0, 0, w, h).data;
+
+            let minX = w, minY = h, maxX = -1, maxY = -1;
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    const i = (y * w + x) * 4;
+                    if (imgData[i] < 250 || imgData[i+1] < 250 || imgData[i+2] < 250) {
+                        if (x < minX) minX = x;
+                        if (y < minY) minY = y;
+                        if (x > maxX) maxX = x;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+
+            if (maxX < minX || maxY < minY) return sourceCanvas;
+
+            const cropW = maxX - minX + 1;
+            const cropH = maxY - minY + 1;
+
+            const out = document.createElement('canvas');
+            out.width  = cropW + padding * 2;
+            out.height = cropH + padding * 2;
+            const outCtx = out.getContext('2d');
+
+            outCtx.fillStyle = '#ffffff';
+            outCtx.fillRect(0, 0, out.width, out.height);
+
+            outCtx.drawImage(
+                sourceCanvas,
+                minX, minY, cropW, cropH,
+                padding, padding, cropW, cropH
+            );
+
+            return out;
+        }
+
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            hideError();
+
+            const data = dataInput.value.trim();
+            if (!data) {
+                showError('Введите данные для штрихкода.');
+                return;
+            }
+
+            const format = formatSelect.value;
+
+            try {
+                const temp = document.createElement('canvas');
+                JsBarcode(temp, data, {
+                    format: format,
+                    width: MODULE_WIDTH_PX,
+                    height: MODULE_HEIGHT_PX,
+                    displayValue: false,
+                    margin: 0,
+                    background: '#ffffff',
+                    lineColor: '#000000',
+                });
+
+                const trimmed = trimWhitespace(temp, PADDING_PX);
+
+                canvas.width  = trimmed.width;
+                canvas.height = trimmed.height;
+                canvas.getContext('2d').drawImage(trimmed, 0, 0);
+
+                currentFilename = safeFilename(data) + '.png';
+                filenameHint.textContent = 'Файл: ' + currentFilename;
+
+                resultBox.style.display = 'block';
+            } catch (err) {
+                showError('Ошибка: ' + err.message);
+            }
+        });
+
+        downloadBtn.addEventListener('click', () => {
+            canvas.toBlob((blob) => {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = currentFilename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }, 'image/png');
+        });
+    </script>
+</body>
+</html>
